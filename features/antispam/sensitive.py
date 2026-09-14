@@ -15,30 +15,89 @@
 
 from core import hub
 
-import html, re
+import html, re, unicodedata
+
+
+def _normalize_for_match(text):
+    """敏感词匹配前的归一化（2026-09-14 Rose 同款 lookalike）。
+
+    把「全角字符 / 同形字母 / emoji 装饰字符 / 大小写」这四类绕过手段压平，
+    让明文子串匹配也能拦下「微信」写「微❤信」「ｗ信」「b0t」写「bot」这种。
+
+    只用于匹配阶段，**不动原文** —— 机器人发给群的消息还是原文，玩家看到的
+    不变；归一只是「翻译员」，让词条和消息用同一种话讲一遍。
+
+    ⚠️ 严格限制：
+      · 只归一「字母 / 数字 / 标点 / 杂符号」，**绝不**对中文字符做同形替换
+        （微/徵、土/士 这种同形中文字不能动，否则会误伤 —— 2026-09-12 那次
+        「一字不差」就是用户对过度模糊的反感）。
+      · emoji 全去掉（category So/Sk/Mn），这样「微❤️信」「ｗ信」都被压回「微信」。
+      · 西里尔/希腊字母只做最常见几个的映射（2025-07 Rose 那次同款）；
+        不做完整 Unicode confusables 表（避免性能问题和漏匹配）。
+    """
+    if not text:
+        return ""
+    # ① NFKC：全角→半角、组合字符分解后重组。中文不受影响，但「ｗ」(全角)→「w」
+    t = unicodedata.normalize("NFKC", str(text))
+    # ② 大小写归一（casefold 比 lower 更彻底，处理德语 ß→ss、土耳其语 İ→i 等）
+    t = t.casefold()
+    # ③ 同形字母 / 数字 归一（仅 ASCII + 西里尔 + 希腊常见几个；中文一字不动）
+    t = t.translate(str.maketrans({
+        # 数字 ↔ 字母（视觉同形）
+        "0": "o", "1": "l", "5": "s",
+        # 希腊 → 拉丁（视觉同形）
+        "α": "a", "ο": "o", "ρ": "p", "ω": "w", "ε": "e",
+        # 西里尔 → 拉丁（视觉同形；小写）
+        "а": "a", "е": "e", "и": "n", "о": "o", "р": "p",
+        "в": "b", "г": "r", "к": "k", "м": "m", "н": "h",
+        "с": "c", "т": "t", "у": "y", "х": "x", "ѕ": "s", "ј": "j",
+        "і": "i", "ѡ": "w", "һ": "h", "ԁ": "d", "ь": "", "ъ": "",
+        # 西里尔大写
+        "А": "a", "В": "b", "Е": "e", "Н": "h", "К": "k",
+        "М": "m", "О": "o", "Р": "p", "С": "c", "Т": "t",
+        "Х": "x", "У": "y",
+    }))
+    # ④ 去装饰字符（emoji、变音符号、合字）。**中文不在这里** —— 汉字的 category 是 Lo
+    out = []
+    for ch in t:
+        cat = unicodedata.category(ch)
+        if cat in ("Mn", "Me", "So", "Sk"):  # 变音符号 / 杂符号
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def _sensitive_hit(text):
-    """敏感词判定：明文按子串（忽略大小写），/xxx/ 形式按正则。返回命中的词条或 None。"""
+    """敏感词判定：明文先归一再子串；/xxx/ 形式按正则（输入也走归一，去掉 emoji 装饰）。
+
+    2026-09-14 Rose 同款 lookalike：词条和消息都过 `_normalize_for_match`，
+    拦下「微信」→「微❤信」「ｗ信」「b0t」→「bot」这种形近字绕过。
+    原文**不变**，机器人发给群的消息还是原样。
+    """
     # ── 依赖 bot 命名空间（延迟绑定 → 测试补丁实时穿透）──
     logger = hub.logger
     sget = hub.sget
     t = str(text or "")
     if not t or not sget("SENSITIVE_WORDS"):
         return None
+    t_norm = _normalize_for_match(t)
     for w in sget("SENSITIVE_WORDS"):
         w = str(w).strip()
         if not w:
             continue
         if len(w) > 2 and w.startswith("/") and w.endswith("/"):
+            # 正则：输入走归一（去掉 emoji/装饰），正则本身用户自己写变形字符类
             try:
-                if re.search(w[1:-1], t, re.I):
+                if re.search(w[1:-1], t_norm, re.I):
                     return w
             except re.error:
                 logger.warning("敏感词正则非法，已跳过：%s", w)
                 continue
-        elif w.lower() in t.lower():
-            return w
+        else:
+            # 明文：双向归一后子串
+            w_norm = _normalize_for_match(w)
+            if w_norm and w_norm in t_norm:
+                return w
     return None
 
 

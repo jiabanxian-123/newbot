@@ -65,11 +65,19 @@ from .raid import (
     observe_check_sweep,
 )
 from .sensitive import (
+    _normalize_for_match,
     _sensitive_enforce,
     _sensitive_hit,
 )
+from .report import (
+    _report_target_text,
+    _report_throttled,
+    cmd_report,
+)
 from .events import (
+    _clean_service_msg,
     on_join_request,
+    on_left_member_msg,
     on_member_event,
     on_my_chat_member,
     on_new_members_msg,
@@ -95,6 +103,10 @@ __all__ = [
     "_jv_wrong_hit",
     "_link_domains",
     "_link_whitelisted",
+    "_clean_service_msg",
+    "_normalize_for_match",
+    "_report_target_text",
+    "_report_throttled",
     "_observe_enforce",
     "_raid_active",
     "_raid_on_join",
@@ -102,9 +114,11 @@ __all__ = [
     "_sensitive_enforce",
     "_sensitive_hit",
     "cmd_jv_pass",
+    "cmd_report",
     "join_verify_sweep",
     "observe_check_sweep",
     "on_join_request",
+    "on_left_member_msg",
     "on_member_event",
     "on_my_chat_member",
     "on_new_members_msg",

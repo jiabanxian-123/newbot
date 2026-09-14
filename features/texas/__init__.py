@@ -10,6 +10,11 @@
 
 from core import hub
 
+# 新界面渲染层（2026-09-14 用户拍板「界面改新版」）：纯函数出 PNG bytes，
+# 任何图片环节失败由调用方回退文本，永不挡牌局 —— 见 img.py 模块注释。
+from .img import _font, _suit_rank, _png, _rrect, _card, _badges
+from .img import card_face, hand_popup, reveal_img, showdown_img, table_img
+
 # 本模块用到的标准库/第三方 import（bot.py 里原有的那几条）
 from contextlib import asynccontextmanager
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, ChatPermissions
@@ -546,14 +551,24 @@ def poker_buttons(game, uid):
     if uid not in game.raise_locked:
         # 半池/全池快捷加注：加注金额=底池的 1/2 或 1 倍；不足最小加注时按最小加注兜底
         _tc, _min_raise, half_amt, pot_amt = _poker_quick_amounts(game, uid)
+        # 去重（2026-09-14 界面新版，skill §4.29 留档的按钮重复项）：
+        # 「支出额」= 跟注 + 加注额。某快捷键的支出额若与更激进的键（全池>半池>加注，
+        # 全下最激进）**完全相同**，两个按钮就是同一个动作 —— 只留语义更强的那个。
+        _allin_amt = game.chips[uid]
+        _raise_spend = _tc + _min_raise          # 「🚀 加注 N」实际支出
+        _half_spend = _tc + half_amt             # 「💰 半池 N」实际支出
+        _pot_spend = _tc + pot_amt               # 「💰 全池 N」实际支出
         row_act = [fold_btn]
-        if game.chips[uid] >= to_call + _min_raise and half_amt > _min_raise:
+        if (game.chips[uid] >= to_call + _min_raise and half_amt > _min_raise
+                and _raise_spend < _pot_spend and _raise_spend < _allin_amt):
             row_act.append(InlineKeyboardButton(f"🚀 加注 {_min_raise}", callback_data=f"texas_raise_{_min_raise}"))
         rows.append(row_act)
         row_p = []
-        if half_amt < pot_amt and game.chips[uid] >= to_call + half_amt:
+        if (half_amt < pot_amt and game.chips[uid] >= to_call + half_amt
+                and _half_spend < _allin_amt):
             row_p.append(InlineKeyboardButton(f"💰 半池 {half_amt}", callback_data="texas_raise_half"))
-        if game.chips[uid] >= to_call + pot_amt:
+        if (game.chips[uid] >= to_call + pot_amt
+                and _pot_spend < _allin_amt):
             row_p.append(InlineKeyboardButton(f"💰 全池 {pot_amt}", callback_data="texas_raise_pot"))
         if row_p: rows.append(row_p)
     else:
@@ -592,18 +607,35 @@ async def render_poker_table(game, app):
     """
     # ── 依赖 bot 命名空间（延迟绑定 → 测试补丁实时穿透）──
     _live_panel_msg = hub._live_panel_msg
+    get_name = hub.get_name
     poker_buttons = hub.poker_buttons
     poker_table_text = hub.poker_table_text
     safe_delete = hub.safe_delete
     safe_send = hub.safe_send
+    safe_send_photo = hub.safe_send_photo
+    table_img = hub.table_img
     async with game._render_lock:
-        text = await poker_table_text(game, app)
         uid = game.current()
         kb = poker_buttons(game, uid) if uid is not None else None
         old_id = game.game_msg_id
         # 本群上一张牌桌：可能属于已被换掉的旧 game（换局/重开后残留的孤儿）
         orphan_id = _live_panel_msg.get(game.chat_id)
-        msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb)
+        # 2026-09-14 界面新版：优先发**桌面图**（椭圆毛毡+真牌图+玩家盒）。
+        # 图片链路任何一环失败（无 PIL / 字体缺失 / fake bot 无 send_photo / 发送异常）
+        # 都回退到原文本渲染 —— 文本路径是底线，一个字都不能少。
+        msg = None
+        try:
+            names = {p: await get_name(app, p) for p in game.players}
+            phase = {"preflop": "翻牌前", "flop": "翻牌圈", "turn": "转牌圈", "river": "河牌圈"}.get(game.phase, game.phase)
+            caption = f"{'🏆 赛季德州' if game.season else '🃏 德州扑克'}｜{phase}"
+            png = await asyncio.to_thread(table_img, game, names)
+            if png is not None:
+                msg = await safe_send_photo(app.bot, game.chat_id, png, caption, reply_markup=kb)
+        except Exception:
+            msg = None
+        if msg is None:
+            text = await poker_table_text(game, app)
+            msg = await safe_send(app.bot, game.chat_id, text, reply_markup=kb)
         if msg:                                   # 发送失败 → 保留旧牌桌，下一轮再试
             game.game_msg_id = msg.message_id
             _live_panel_msg[game.chat_id] = msg.message_id
@@ -666,6 +698,7 @@ async def start_turn_timer(game, app):
             if game.phase == "showdown": await settle_poker(game, app)
             else: await start_turn_timer(game, app)
             return
+    await deal_hand_cards(game, app)   # 开局私发弹窗手牌图（hands_dealt 防重发；失败静默，回退靠「手牌」按钮）
     await render_poker_table(game, app)
     game.turn_started_at = time.time()
     # 行动提醒：单独一条 + 60 秒自动删除（2026-09-12 用户要求，牌桌正文里已不再写行动行）
@@ -774,6 +807,7 @@ async def settle_poker(game, app):
     record_game_flows = hub.record_game_flows
     safe_send = hub.safe_send
     safe_send_long = hub.safe_send_long
+    safe_send_photo = hub.safe_send_photo
     save_data = hub.save_data
     schedule_delete = hub.schedule_delete
     schedule_delete_ids = hub.schedule_delete_ids
@@ -785,6 +819,8 @@ async def settle_poker(game, app):
     season_rebuy = hub.season_rebuy
     send_settle_rank = hub.send_settle_rank
     sget = hub.sget
+    showdown_img = hub.showdown_img
+    safe_send_photo = hub.safe_send_photo
     user_wallet_locks = hub.user_wallet_locks
     if game.settled: return
     game.settled = True; game.cancel_timer(); game.cancel_auto(); game.cancel_wait()
@@ -796,6 +832,18 @@ async def settle_poker(game, app):
         date, hand_types = business_date(), result[0][4]
         name_ids = set(game.players) | set(game.showdown_order)
         names = {uid: await get_name(app, uid) for uid in name_ids}
+
+        # 摊牌+结算摘要图（2026-09-14 界面新版）：赢家金框/弃牌灰底/净盈亏红灰条，
+        # 发在结算正文**之前**。仅多人摊牌才发 —— 单赢场景走下方「亮牌按钮」（muck 规则）。
+        # 图片任何失败都静默跳过：结算正文（safe_send_long）才是权威账目，绝不能被图挡住。
+        if len(game.showdown_order) > 1:
+            try:
+                _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players}
+                _png = await asyncio.to_thread(showdown_img, game, names, result, _nets)
+                if _png is not None:
+                    await safe_send_photo(app.bot, game.chat_id, _png, "🃏 摊牌")
+            except Exception:
+                pass
 
         # 抽水先算（官方模式），面板「盈亏」行直接带实收；资金流审查同源
         _nets = {uid: game.chips[uid] - game.initial_chips[uid] for uid in game.players} \
@@ -912,6 +960,7 @@ async def handle_texas_reveal(cid, uid, q, context):
     recent_poker_reveals = hub.recent_poker_reveals
     safe_edit = hub.safe_edit
     safe_send = hub.safe_send
+    safe_send_photo = hub.safe_send_photo
     schedule_delete_ids = hub.schedule_delete_ids
     schedule_notice_delete = hub.schedule_notice_delete
     sget = hub.sget
@@ -930,9 +979,19 @@ async def handle_texas_reveal(cid, uid, q, context):
     name = await get_name(context.application, info["winner"])
     hand_text = "  ".join(card_str(c) for c in info["hand"])
     board_text = "  ".join(card_str(c) for c in info["board"]) if info["board"] else "（未发公牌）"
-    _reveal_msg = await safe_send(context.bot, cid,
-        f"🃏 <b>{name} 亮牌</b>：{hand_text}\n🃏 公牌：{board_text}（收全部底池）",
-        parse_mode="HTML")
+    # 2026-09-14 界面新版：优先发**亮牌图**（赢家大牌金框+公牌行），失败回退原文本。
+    _reveal_msg = None
+    try:
+        reveal_img = hub.reveal_img
+        _png = await asyncio.to_thread(reveal_img, name, info["hand"], info["board"])
+        if _png is not None:
+            _reveal_msg = await safe_send_photo(context.bot, cid, _png, f"🃏 {name} 亮牌")
+    except Exception:
+        _reveal_msg = None
+    if _reveal_msg is None:
+        _reveal_msg = await safe_send(context.bot, cid,
+            f"🃏 <b>{name} 亮牌</b>：{hand_text}\n🃏 公牌：{board_text}（收全部底池）",
+            parse_mode="HTML")
     schedule_notice_delete(context.application, cid, _reveal_msg, kind="settle")
     rid = info.get("reveal_msg_id")
     if rid:
@@ -946,6 +1005,42 @@ async def handle_texas_reveal(cid, uid, q, context):
     if not recent_poker_reveals[cid]:
         recent_poker_reveals.pop(cid, None)
     await q.answer("已亮牌")
+
+
+async def send_hand_card(app, uid, hand):
+    """把某玩家的弹窗手牌图**私发**给他。返回 Message；任何失败返回 None。
+
+    失败场景（都不算错误）：用户从未私聊过 bot（Forbidden）/ bot 被'拉黑 /
+    渲染环境缺 Pillow 或字体 / 测试 fake bot 无 send_photo。
+    调用方拿到 None 就回退 q.answer(alert 报牌面) —— 手牌永远看得到。
+    """
+    # ── 依赖 bot 命名空间（延迟绑定 → 测试补丁实时穿透）──
+    get_name = hub.get_name
+    hand_popup = hub.hand_popup
+    safe_send_photo = hub.safe_send_photo
+    if not hand: return None
+    try:
+        if not hasattr(app.bot, "send_photo"): return None   # fake bot / 环境无图能力
+        name = await get_name(app, uid)
+        png = await asyncio.to_thread(hand_popup, name, list(hand))
+        return await safe_send_photo(app.bot, uid, png, f"🃏 {name}，这是你的底牌（只有你能看）")
+    except Exception:
+        return None
+
+
+async def deal_hand_cards(game, app):
+    """开局给每位玩家私发弹窗手牌图（2026-09-14 界面新版）。
+
+    - `game.hands_dealt` 标记防重发（start_turn_timer 每回合都会跑进来）；
+    - 先标记后发送：个别玩家私聊发送失败也**不重试不刷屏**，回退靠「🃏 手牌」按钮；
+    - send_hand_card 内部全吞异常 → 本函数绝不打断开局流程（含测试 fake 环境）。
+    """
+    if getattr(game, "hands_dealt", False): return
+    game.hands_dealt = True
+    for uid in game.players:
+        hand = game.hands.get(uid)
+        if hand and uid not in game.folded:
+            await send_hand_card(app, uid, hand)
 
 
 # ── 游戏互斥：同一群里同时只允许一个游戏进行（2026-09-14 用户要求）─────────

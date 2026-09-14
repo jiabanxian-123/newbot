@@ -20,11 +20,59 @@ from telegram.error import TelegramError
 import time
 
 
+async def _clean_service_msg(context, message, kind):
+    """清理服务消息：入群/退群的系统提示（Rose cleanservice 同款）。
+
+    赌场群人来人往，「XX 加入了群组」这类提示一天几百条 —— 既刷屏，又等于给
+    广告号直播你群里有多热闹。开关 CLEAN_SERVICE_ENABLED 打开就删掉。
+
+    ⚠️ 删不掉是常态（bot 没删除权限 / 消息太旧 / 已被别人删）→ 只 warning 不抛，
+       **绝不能因为删不掉就打断入群流程**（入群验证/防突袭都在同一条链上）。
+    """
+    # ── 依赖 bot 命名空间（延迟绑定 → 测试补丁实时穿透）──
+    logger = hub.logger
+    sget = hub.sget
+    if not message:
+        return False
+    if not sget("CLEAN_SERVICE_ENABLED"):
+        return False
+    try:
+        await context.bot.delete_message(chat_id=message.chat_id, message_id=message.message_id)
+        logger.info("服务消息已清理（%s）cid=%s mid=%s", kind, message.chat_id, message.message_id)
+        return True
+    except Exception as e:
+        logger.warning("服务消息删除失败（%s）cid=%s mid=%s：%r",
+                       kind, message.chat_id, message.message_id, e)
+        return False
+
+
+async def on_left_member_msg(update, context):
+    """退群服务消息（message 版）：只清理提示，不重复记 leave_records。
+
+    普通群收不到 chat_member 更新，退群只有这条服务消息兜底；chat_member 版
+    （on_member_event）能收到时这里也会触发（Telegram 两路都发），所以这里
+    **只做清理**，退群统计仍由 on_member_event 负责，避免记两遍。
+    """
+    # ── 依赖 bot 命名空间（延迟绑定 → 测试补丁实时穿透）──
+    _bind_update_cid = hub._bind_update_cid
+    _clean_service_msg = hub._clean_service_msg
+    logger = hub.logger
+    _bind_update_cid(update)
+    try:
+        message = update.effective_message
+        if not message or not getattr(message, "left_chat_member", None):
+            return
+        await _clean_service_msg(context, message, "退群")
+    except Exception:
+        logger.exception("退群服务消息处理异常（已吞并）")
+
+
 async def on_new_members_msg(update, context):
     """message 版入群事件（普通群收不到 chat_member 更新，只能靠服务消息兜底）。
     普通群的服务消息不带邀请链接，能归因到就走 pending 映射，归因不到就静默跳过。"""
     # ── 依赖 bot 命名空间（延迟绑定 → 测试补丁实时穿透）──
     _bind_update_cid = hub._bind_update_cid
+    _clean_service_msg = hub._clean_service_msg
     _inv_dbg = hub._inv_dbg
     _invite_track_join = hub._invite_track_join
     _join_gate_check = hub._join_gate_check
@@ -56,6 +104,9 @@ async def on_new_members_msg(update, context):
                 member_joined_at[cid][uid] = time.time()
                 if _gate_ok and (sget("JOIN_VERIFY_ENABLED") or _raid_active(cid)):
                     await _join_verify_start(context, cid, uid, name)
+        # 入群提示清理放在**最后**：硬门槛/防突袭/入群验证都跑完才删，
+        # 否则删早了会导致新人记录不到（「开关开了没反应」的另一种死法）。
+        await _clean_service_msg(context, message, "入群")
     except Exception:
         logger.exception("message 入群事件处理异常（已吞并）")
 
