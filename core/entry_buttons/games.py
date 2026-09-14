@@ -110,6 +110,7 @@ async def _btn_texas(update, context, q, cid, uid, data):
     season_joined = hub.season_joined
     season_points = hub.season_points
     season_rebuy = hub.season_rebuy
+    send_hand_card = hub.send_hand_card
     settle_poker = hub.settle_poker
     sget = hub.sget
     start_turn_timer = hub.start_turn_timer
@@ -119,7 +120,15 @@ async def _btn_texas(update, context, q, cid, uid, data):
         await handle_texas_reveal(cid, uid, q, context); return
     if not game: await q.answer("德州游戏已结束", show_alert=True); return
     if data == "texas_hand":
-        hand = game.hands.get(uid); await q.answer(f"你的手牌：{card_str(hand[0])}  {card_str(hand[1])}" if hand and uid not in game.folded else "当前无法查看手牌", show_alert=True); return
+        # 2026-09-14 界面新版：优先**私聊发弹窗手牌图**（深色遮罩+白窗+大牌），
+        # 发不出去（没私聊过 bot / 图能力缺失）才回退 alert 报牌面 —— 手牌永远看得到。
+        hand = game.hands.get(uid)
+        if hand and uid not in game.folded:
+            _sent = await send_hand_card(context.application, uid, hand)
+            if _sent is not None: await q.answer("已私发你的手牌 ☝️")
+            else: await q.answer(f"你的手牌：{card_str(hand[0])}  {card_str(hand[1])}", show_alert=True)
+        else: await q.answer("当前无法查看手牌", show_alert=True)
+        return
     if data == "texas_end":
         if not is_bot_admin(uid) and uid not in game.players:
             await q.answer("权限不足", show_alert=True); return
@@ -196,13 +205,16 @@ async def _btn_texas(update, context, q, cid, uid, data):
         except ValueError: await q.answer("无效加注额", show_alert=True); return
     if not action: await q.answer("未知操作", show_alert=True); return
     # 2026-09-13 用户要求（防误触）：全下 / 跟注 要掏积分，必须二次确认。
+    # 2026-09-14 用户要求：弃牌同样加确认 —— 牌一扔不可撤销（本手底池份额直接没了），
+    # 误触代价和全下同级；机制完全照抄全下（pending_confirm + 10 秒内再点一次）。
     # 为什么是「再点一次同一个按钮」而不是另加一个确认键：牌桌是**全群共享**的
     # 一条消息，换成确认键盘会让别人的画面也变成确认界面（炸金花比牌菜单那样
     # 得额外加锁 + 超时）。再点一次只影响点的人，且不留下任何界面状态。
     # 「过牌」（to_call=0，callback 走 texas_check）不花钱，不拦。
-    if action in ("allin", "call"):
-        _cost = game.chips[uid] if action == "allin" else max(0, game.current_bet - game.round_bets[uid])
-        if _cost > 0:
+    if action in ("allin", "call", "fold"):
+        _cost = game.chips[uid] if action == "allin" else (
+            max(0, game.current_bet - game.round_bets[uid]) if action == "call" else 0)
+        if _cost > 0 or action == "fold":
             _pend = game.pending_confirm
             _prev = _pend.get(uid)
             _now = time.time()
@@ -210,8 +222,9 @@ async def _btn_texas(update, context, q, cid, uid, data):
                 _pend.pop(uid, None)      # 确认通过：清掉待确认，继续往下执行
             else:
                 _pend[uid] = (action, extra, _now)
-                _word = "全下" if action == "allin" else "跟注"
-                await q.answer(f"⚠️ 再点一次「{_word} {_cost}」确认（10 秒内有效）", show_alert=True)
+                _word = {"allin": "全下", "call": "跟注", "fold": "弃牌"}[action]
+                _amt = f" {_cost}" if _cost > 0 else ""
+                await q.answer(f"⚠️ 再点一次「{_word}{_amt}」确认（10 秒内有效）", show_alert=True)
                 return
     ok, desc = game.action(uid, action, extra)
     if not ok: await q.answer(desc, show_alert=True); return
