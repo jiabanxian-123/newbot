@@ -1,0 +1,6 @@
+# 源码统一 LF：本机 bot.py 是 LF，避免 git 自动转 CRLF 造成全文件假 diff
+*.py text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+Procfile text eol=lf
+*.md text eol=lf

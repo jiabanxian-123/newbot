@@ -1,0 +1,40 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+bot_data.json
+bot_settings.json
+bot_data.json.bak
+# Q9：数据拆成 6 个分片后落在 parts/（与数据文件同级）。
+# 和 bot_data.json 同类 —— 是运行期数据，绝不能入库（测试在仓库根跑会就地生成）。
+parts/
+bot_data.json.restore_tmp
+bot_data.json.restore_bak
+*.log
+*.bak
+*.bak_*
+bot_backup_*.py
+
+_scratch/fullreg_result.txt
+_scratch/*.txt
+_scratch/*.json
+_scratch/*.png
+
+# 抽缝前的一次性备份（1MB+，不入库；需要回滚时本地还在）
+_scratch/bot.py.before_extract
+_scratch/bot.py.*
+
+.env
+.venv/
+venv/
+
+# 测试/诊断临时产物
+_hygiene_tmp.json
+*.eolbak
+
+# 抽缝起点基线（由 _scratch/_prepare_reextract.py 从 git 现取，不入库）
+_scratch/clean_*.py
+
+# 引擎每次运行都会重写的调试产物（5,000 行，无测试引用）
+_scratch/last_generated_*.py
