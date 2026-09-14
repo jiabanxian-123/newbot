@@ -344,6 +344,7 @@ async def on_text(update, context):
     CMD_ALIASES = hub.CMD_ALIASES
     _antispam_check = hub._antispam_check
     _antispam_hit = hub._antispam_hit
+    _autoreply_enforce = hub._autoreply_enforce
     _award_chat_points = hub._award_chat_points
     _bind_update_cid = hub._bind_update_cid
     _check_level_change = hub._check_level_change
@@ -423,6 +424,8 @@ async def on_text(update, context):
                 await _dispatch_alias("抽奖", [], update, context)
                 return
 
+        # 关键词自动回复：排在过滤链+抽奖之后；本群打牌时不插嘴（见 features/autoreply）
+        if await _autoreply_enforce(update, context): return
         # 不带 / 的命令直达：若首词是已知命令别名，按命令处理（全部命令均可不带 / 触发）
         _words = text.split()
         if _words and _words[0] in CMD_ALIASES:
