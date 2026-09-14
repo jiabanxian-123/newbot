@@ -274,12 +274,18 @@ from core.modcmds import (  # noqa: E402
 )
 
 # ---------- 抽出的功能域：re-export（bot.xxx 必须仍是同一对象）----------
+from features.autoreply import (  # noqa: E402
+    _autoreply_enforce,
+    _keyword_reply_match,
+    _parse_keyword_rules,
+)
 from features.antispam import (  # noqa: E402
     _antispam_check,
     _antispam_hit,
     _antispam_norm,
     _antispam_prune,
     _captcha_render,
+    _clean_service_msg,
     _forcesub_enforce,
     _fsub_links,
     _fsub_parse,
@@ -293,16 +299,21 @@ from features.antispam import (  # noqa: E402
     _jv_wrong_hit,
     _link_domains,
     _link_whitelisted,
+    _normalize_for_match,
     _observe_enforce,
     _raid_active,
     _raid_on_join,
     _raid_recover,
+    _report_target_text,
+    _report_throttled,
     _sensitive_enforce,
     _sensitive_hit,
     cmd_jv_pass,
+    cmd_report,
     join_verify_sweep,
     observe_check_sweep,
     on_join_request,
+    on_left_member_msg,
     on_member_event,
     on_my_chat_member,
     on_new_members_msg,
@@ -486,17 +497,26 @@ from features.jinhua import (  # noqa: E402
 # ---------- 抽出的功能域：re-export（bot.xxx 必须仍是同一对象）----------
 from features.texas import (  # noqa: E402
     PokerGame,
+    _badges,
+    _card,
+    _font,
     _game_gate,
+    _png,
     _poker_quick_amounts,
     _poker_settle_lines,
     _poker_watchdog_tick,
+    _rrect,
+    _suit_rank,
+    card_face,
     cmd_dz,
     cmd_end,
     current_game_mode,
+    deal_hand_cards,
     game_mutex_enabled,
     game_mutex_running,
     game_mutex_wait_idle,
     handle_texas_reveal,
+    hand_popup,
     panel_adopt,
     player_is_busy,
     player_line,
@@ -508,10 +528,14 @@ from features.texas import (  # noqa: E402
     poker_watchdog,
     refund_poker,
     render_poker_table,
+    reveal_img,
     retire_panel,
+    send_hand_card,
     settle_poker,
+    showdown_img,
     start_turn_timer,
     start_wait_timeout,
+    table_img,
     update_poker_table,
     update_poker_waiting,
     user_wallet_locks,
@@ -978,6 +1002,10 @@ SETTINGS_FIELDS = [
     ("join_verify_max_wrong", "JOIN_VERIFY_MAX_WRONG", "验证答错N次按超时档处理(0=不限)", "int", 0, 20, "mod"),
     ("join_verify_msg",       "JOIN_VERIFY_MSG",       "验证提示({name} {seconds})", "text", 0, 0, "mod"),
     ("join_verify_ok_msg",    "JOIN_VERIFY_OK_MSG",    "验证通过提示({name})",    "text", 0, 0, "mod"),
+    ("clean_service_enabled", "CLEAN_SERVICE_ENABLED", "清理入群/退群系统提示(防刷屏)", "bool", 0, 1, "mod"),
+    ("sep_autoreply",         None, "③ 关键词自动回复", "sep", 0, 0, "mod"),
+    ("autoreply_enabled",     "AUTOREPLY_ENABLED",     "关键词自动回复开关",      "bool", 0, 1, "mod"),
+    ("keyword_replies",       "KEYWORD_REPLIES",       "关键词自动回复(每行: 关键词|回复内容)", "text", 0, 0, "mod"),
     ("sep_mod_word",          None, "② 敏感词与域名白名单", "sep", 0, 0, "mod"),
     ("sensitive_enabled",     "SENSITIVE_ENABLED",     "敏感词过滤开关",          "bool", 0, 1, "mod"),
     ("sensitive_words",       "SENSITIVE_WORDS",       "敏感词(逗号分隔；/正则/ 形式支持正则)", "names", 0, 0, "mod"),
@@ -1297,6 +1325,9 @@ JOIN_VERIFY_MAX_WRONG = 0  # 验证答错 N 次按超时档处理（0=不限次�
 JOIN_GATE_USERNAME = 0     # 进群硬门槛：须有用户名（不满足直接移出，不进验证流程）
 JOIN_GATE_PREMIUM = 0      # 进群硬门槛：须 Telegram Premium
 JOIN_GATE_BIO = 0          # 进群硬门槛：须有简介（需额外查 API；查询失败宁放过不误杀）
+AUTOREPLY_ENABLED = 0       # 关键词自动回复开关
+KEYWORD_REPLIES = ""        # 每行一条：关键词|回复内容（见 features/autoreply）
+CLEAN_SERVICE_ENABLED = 0   # 清理「XX 加入了群组/退出了群组」系统提示（防刷屏）
 SENSITIVE_ENABLED = 0       # 敏感词过滤
 SENSITIVE_WORDS = []        # 敏感词表（明文子串，或 /正则/ 形式）
 SENSITIVE_ACTION = 0        # 命中处理：0=删除 1=删除+禁言 2=删除+踢出
@@ -2187,6 +2218,7 @@ DEFAULT_TG_MENU = [
     ("ban", "拉黑玩家(管理员)"), ("unban", "解封玩家(管理员)"), ("banlist", "查看黑名单(管理员)"),
     ("list", "管理总览(管理员/群/黑名单)"),
     ("record", "个人战绩"), ("status", "机器人自检(管理员)"),
+    ("report", "举报消息给管理(回复一条消息用)"),
 ]
 TG_MENU = [list(t) for t in DEFAULT_TG_MENU]
 
@@ -2209,6 +2241,7 @@ CMD_ALIASES = {
     "解黑": cmd_unban, "解封": cmd_unban, "取消拉黑": cmd_unban, "unban": cmd_unban,
     "黑名单": cmd_banlist, "黑名单列表": cmd_banlist, "banlist": cmd_banlist,
     "列表": cmd_list_all, "list": cmd_list_all, "总览": cmd_list_all,
+    "举报": cmd_report, "report": cmd_report, "投诉": cmd_report,
     "加管理员": cmd_addadmin,
     "减管理员": cmd_deladmin,
     "管理员列表": cmd_admin_list, "管理员": cmd_admin_list,
@@ -2360,6 +2393,7 @@ def main():
     # 单独放 group=3，避免与上面的 ANY_CHAT_MEMBER 在同一 group 内被先匹配 break 掉（用户 2026-09-11 需求）
     app.add_handler(ChatMemberHandler(on_my_chat_member, chat_member_types=ChatMemberHandler.MY_CHAT_MEMBER), group=3)
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members_msg), group=2)  # 普通群入群兜底
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member_msg), group=2)  # 退群提示清理
     app.add_handler(ChatJoinRequestHandler(on_join_request), group=2)  # 入群申请事件（群需开「申请加入」）
     app.add_error_handler(on_app_error)  # 全局错误兜底：handler 异常不再静默
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
